@@ -3,11 +3,21 @@ import {
   FoundRecord,
   Indexes
 } from './types';
-import { defer, generatorToArray, idbRequestWrapper } from './utils';
+import {
+  defer,
+  genToArr,
+  idbRequestWrapper,
+  mergeWords,
+  splitByWords,
+  sort as sortF,
+  iterSort
+} from './utils';
+import { SortOptions } from './types';
 
 export class BaseEntity {
   static NAME: string;
   static INDEXES: Indexes = [];
+  // TODO: feature
   static CONSTRAINTS: [];
   static FIELDS: EntityFields;
 
@@ -35,7 +45,8 @@ export class BaseEntity {
     {
       offset, limit
     }: {
-      offset?: number, limit?: number
+      offset?: number
+      limit?: number
     } = {
       offset: null, limit: null
     }
@@ -69,56 +80,30 @@ export class BaseEntity {
         offset = null;
         continue;
       }
-      let isArr = false;
-      const found = Object.entries(query).some(([field, value]) => {
+      let isInList = false;
+      // add .or() function, where .and() by default
+      const found = Object.entries(query).every(([field, value]) => {
         if (Array.isArray(value)) {
-          isArr = true;
+          isInList = true;
           return value.includes(cursor.value[field]);
         }
-        return false;
+        if (typeof value === 'function') {
+          isInList = true;
+          return value(cursor.value[field]);
+        }
+        return true;
       });
-      if (isArr && !found) {
+      if (isInList && !found) {
         cursor.continue();
         continue;
       }
       let nextKey: IDBValidKey = yield cursor.value as T;
 
       if (limit !== null && !--limit) {
-        break;
+        return;
       }
       cursor.continue(nextKey);
     }
-  }
-
-  // TODO: in developing
-  async sort<T = any>(
-    query: IDBValidKey | IDBKeyRange | Partial<T>,
-    sort: [keyof T, boolean?][],
-    { limit }: { limit: number } = { limit: null }
-  ): Promise<T[]> {
-
-    let sortedRecords: T[] = [];
-    for await (const record of this.iterate<T>(query)) {
-      const sortField = sort[0][0];
-      const asc = sort[0][1];
-
-      let inserted = false;
-      for (let i = 0; i < sortedRecords.length; i++) {
-        if (
-          asc === undefined || asc
-            ? (record[sortField] as any).length < (sortedRecords[i][sortField] as any).length
-            : (record[sortField] as any).length > (sortedRecords[i][sortField] as any).length
-        ) {
-          sortedRecords.splice(i, 0, record);
-          inserted = true;
-          break;
-        }
-      }
-      if (!inserted) {
-        sortedRecords.push(record);
-      }
-    }
-    return limit ? sortedRecords.slice(0, limit) : sortedRecords;
   }
 
   async autocomplete<T = any>(
@@ -145,20 +130,29 @@ export class BaseEntity {
       if (sourceValue === undefined) {
         continue;
       }
-      const matchValueLen = (query[keyToMatch] as any).length;
-      if (!matchValueLen) {
-        // add each record if query is empty string
+      const queryLen = ((query[keyToMatch] as any) as string).length;
+      if (!queryLen) {
+        // add each record if empty string passed
         matchedRecords.push(iterationResult.value as T);
         continue;
       }
-      for (let i = 0; i < sourceValue.length; i += matchValueLen) {
-        const matched = sourceValue.substr(i, matchValueLen).localeCompare(
-          query[keyToMatch], locales, { sensitivity: 'base' }
-        ) === 0;
+      const queryWords = splitByWords(query[keyToMatch] as any);
+      const sourceStr = mergeWords(sourceValue);
 
-        if (matched) {
-          matchedRecords.push(iterationResult.value as T);
+      const matched = queryWords.every((queryWord) => {
+        for (let sWordCharInd = 0; sWordCharInd < sourceStr.length; sWordCharInd++) {
+          const matched = sourceStr.substr(sWordCharInd, queryWord.length).localeCompare(
+            queryWord, locales, { sensitivity: 'base' }
+          ) === 0;
+
+          if (matched) {
+            return true;
+          }
         }
+      });
+
+      if (matched) {
+        matchedRecords.push(iterationResult.value as T);
       }
     }
     matchedRecords.sort(asc || asc === undefined
@@ -202,22 +196,68 @@ export class BaseEntity {
   async getAll<T = any>(
     query: IDBValidKey | IDBKeyRange | Partial<T>,
     {
-      offset,
-      limit
+      offset, limit, sort
     }: {
       offset?: number
       limit?: number
+      sort?: SortOptions
     } = {
-      offset: null,
-      limit: null
+      offset: null, limit: null, sort: null
     }
   ): Promise<T[]> {
 
-    return await generatorToArray(this.iterate<T>(query, { offset, limit }));
+    if (sort) {
+      return iterSort<T>(this.iterate<T>(query), sort, offset, limit);
+    }
+    return genToArr<T>(this.iterate<T>(query, { offset, limit }));
+  }
+
+  async aggMap<T = any>(
+    query: IDBValidKey | IDBKeyRange | Partial<T>,
+    keyField: keyof T,
+    fields: (keyof T)[],
+    flat: boolean = false
+  ): Promise<Record<any, Partial<T>> | Partial<T>> {
+
+    const result: Record<any, Partial<T>> = (await this.getAll<T>(query)).reduce((aggResult: any, record: T) => {
+      aggResult[record[keyField]] = fields.reduce((recordResult: Record<any, Partial<T>>, field) => {
+        recordResult[field] = record[field] + (aggResult[record[keyField]]?.[field] || 0);
+        return recordResult;
+      }, {});
+      aggResult[record[keyField]][keyField] = record[keyField];
+      return aggResult;
+    }, {});
+
+    if (flat) {
+      return Object.values(result)[0];
+    }
+    return result;
+  }
+
+  async agg<T = any>(
+    query: IDBValidKey | IDBKeyRange | Partial<T>,
+    key: keyof T,
+    fields: (keyof T)[],
+    {
+      offset, limit, sort
+    }: {
+      offset?: number
+      limit?: number
+      sort?: SortOptions
+    } = {
+      offset: null, limit: null, sort: null
+    }
+  ): Promise<Partial<T>[]> {
+
+    const records = Object.values(await this.aggMap<T>(query, key, fields));
+    if (sort) {
+      return sortF(records, sort, offset, limit);
+    }
+    return (offset || limit) ? records.splice(offset, limit) : records;
   }
 
   async getCount(index: string, query: IDBValidKey): Promise<number> {
-    return await idbRequestWrapper<number>(this.getObjectStore().index(index).count(query));
+    return idbRequestWrapper<number>(this.getObjectStore().index(index).count(query));
   }
 
   async get<T = any>(
@@ -241,11 +281,13 @@ export class BaseEntity {
   }
 
   private getObjectStore(mode: IDBTransactionMode = 'readonly'): IDBObjectStore {
-    const entity = Object.getPrototypeOf(this).constructor;
-    if (!entity.NAME) {
+    const entity: typeof BaseEntity = Object.getPrototypeOf(this).constructor;
+
+    const storeName = entity.NAME;
+    if (!storeName) {
       throw new Error(`The "NAME" property for "${entity.name}" entity wasn't set`);
     }
-    return this.db.transaction(entity.NAME, mode).objectStore(entity.NAME);
+    return this.db.transaction(storeName, mode).objectStore(storeName);
   }
 
   private requestMethodSelector<T = any>(
@@ -303,12 +345,12 @@ export const getEntityKeyPath = (entity: typeof BaseEntity): [string[], string] 
 export const getAllIndexFields = (entity: typeof BaseEntity): any[] => {
   return Array.from((entity.INDEXES || []).reduce((result: Set<string>, indexDesc) => {
     if (typeof indexDesc === 'object') {
-      if (!indexDesc.options?.unique) {
-        if (Array.isArray(indexDesc.keyPath)) {
+      if (Array.isArray(indexDesc.keyPath)) {
+        if (!indexDesc.options?.unique) {
           indexDesc.keyPath.forEach((field) => result.add(field));
-        } else {
-          result.add(indexDesc.keyPath);
         }
+      } else {
+        result.add(indexDesc.keyPath);
       }
     } else {
       result.add(indexDesc);
@@ -343,7 +385,9 @@ export const selectIndex = (entity: typeof BaseEntity, passedIndexFields): [stri
       continue;
     }
     // string value
-    selectedIndex = [indexDesc, [indexDesc]]
+    selectedIndex = [indexDesc, [indexDesc]];
   }
   return selectedIndex;
 };
+
+export const exclude = (values: any[]) => (value: any): boolean => !values.includes(value);

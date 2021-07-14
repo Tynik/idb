@@ -10,17 +10,18 @@ export class Store {
   private readonly transaction: IDBTransaction;
   private readonly keyRange: IDBKeyRange;
   private isConnected: Deferred;
-  private onUpgradeCallback: (db: IDBDatabase, oldVersion: number, newVersion: number) => void;
+  private onUpgradeCallback: (db: IDBDatabase, oldVersion: number, newVersion: number, transaction: IDBTransaction) => void;
 
   constructor(name: string, version: number, entities: typeof BaseEntity[]) {
     this.name = name;
     this.version = version;
     this.entities = entities;
+    // @ts-ignore
     this.db = window.indexedDB || window.mozIndexedDB || window.webkitIndexedDB || window.msIndexedDB;
+    // @ts-ignore
     this.transaction = window.IDBTransaction || window.webkitIDBTransaction || window.msIDBTransaction;
+    // @ts-ignore
     this.keyRange = window.IDBKeyRange || window.webkitIDBKeyRange || window.msIDBKeyRange;
-
-    this.init();
 
     // Object.entries(entities).forEach(([entityName, entity]) => {
     //   Object.entries(entity.FIELDS).forEach(([fieldName, field]) => {
@@ -58,7 +59,7 @@ export class Store {
     request.onupgradeneeded = (e) => {
       const db = (e.target as IDBOpenDBRequest).result;
 
-      if (e.newVersion === 1) {
+      if (!e.oldVersion) {
         this.entities.forEach((entity) => {
           const [keyPath, autoIncrementKey] = getEntityKeyPath(entity);
 
@@ -83,12 +84,12 @@ export class Store {
         });
       }
       if (this.onUpgradeCallback) {
-        this.onUpgradeCallback(db, e.oldVersion, e.newVersion);
+        this.onUpgradeCallback(db, e.oldVersion, e.newVersion, request.transaction);
       }
     };
   }
 
-  onUpgrade(callback: (db: IDBDatabase, oldVersion: number, newVersion: number) => void) {
+  onUpgrade(callback: (db: IDBDatabase, oldVersion: number, newVersion: number, transaction: IDBTransaction) => void) {
     this.onUpgradeCallback = callback;
   }
 

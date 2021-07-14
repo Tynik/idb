@@ -3,3 +3,5 @@ export interface Deferred<S = any, E = any> {
   resolve: (value: S) => void
   reject: (reason?: E) => void
 }
+
+export type SortOptions = [string, boolean?][];

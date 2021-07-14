@@ -14,8 +14,8 @@ const requestAPI = (
   resultHandler = (result: any, advance: (offset: number) => void, next: (key?: IDBValidKey) => void) => result
 ): IDBRequest => {
   const request = {
-    onsuccess(this: IDBRequest<T>, ev: Event): any { },
-    onerror(this: IDBRequest<T>, ev: Event): any { }
+    onsuccess(this: IDBRequest, ev: Event): any { },
+    onerror(this: IDBRequest, ev: Event): any { }
   };
   (function triggerSuccessEvent(leftResults) {
     setTimeout(() => {
